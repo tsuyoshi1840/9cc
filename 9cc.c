@@ -107,6 +107,15 @@ bool is_alnum(char c) {
   return is_alpha(c) || ('0' <= c && c <= '9');
 }
 
+// キーワード（変数名に使えない予約語）なら true
+bool is_keyword(char *p, int len) {
+  char *kw[] = {"return", "if", "else", "while", "for"};
+  for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
+    if (strlen(kw[i]) == len && !memcmp(p, kw[i], len))
+      return true;
+  return false;
+}
+
 // p が q で始まっていれば true
 bool startswith(char *p, char *q) {
   return memcmp(p, q, strlen(q)) == 0;
@@ -137,12 +146,16 @@ Token *tokenize(char *p) {
       continue;
     }
 
-    // 英字か _ で始まり、英数字か _ が続くものを変数名とする
+    // 英字か _ で始まり、英数字か _ が続くもの（キーワードか変数名）
     if (is_alpha(*p)) {
       char *start = p;
       while (is_alnum(*p))
         p++;
-      cur = new_token(TK_IDENT, cur, start, p - start);
+      int len = p - start;
+      if (is_keyword(start, len))
+        cur = new_token(TK_RESERVED, cur, start, len); // キーワードは記号と同じ扱い
+      else
+        cur = new_token(TK_IDENT, cur, start, len);
       continue;
     }
 
@@ -177,6 +190,10 @@ typedef enum {
   ND_ASSIGN, // =（代入）
   ND_LVAR,   // 変数
   ND_NUM,    // 整数
+  ND_RETURN, // return
+  ND_IF,     // if
+  ND_WHILE,  // while
+  ND_FOR,    // for
 } NodeKind;
 
 typedef struct Node Node;
@@ -187,6 +204,13 @@ struct Node {
   Node *rhs;     // 右の枝
   int val;       // 数のときの値
   int offset;    // 変数のときの、rbpからの距離
+
+  // if / while / for で使う
+  Node *cond; // 条件
+  Node *then; // 条件が真のときに実行する文
+  Node *els;  // else のときに実行する文
+  Node *init; // for の初期化
+  Node *inc;  // for の更新
 };
 
 Node *new_node(NodeKind kind, Node *lhs, Node *rhs) {
@@ -245,8 +269,59 @@ void program() {
 }
 
 // 文 = 式 ";"
+//    | "return" 式 ";"
+//    | "if" "(" 式 ")" 文 ("else" 文)?
+//    | "while" "(" 式 ")" 文
+//    | "for" "(" 式? ";" 式? ";" 式? ")" 文
 Node *stmt() {
-  Node *node = expr();
+  Node *node;
+
+  if (consume("return")) {
+    node = new_node(ND_RETURN, expr(), NULL);
+    expect(";");
+    return node;
+  }
+
+  if (consume("if")) {
+    node = new_node(ND_IF, NULL, NULL);
+    expect("(");
+    node->cond = expr();
+    expect(")");
+    node->then = stmt();
+    if (consume("else"))
+      node->els = stmt();
+    return node;
+  }
+
+  if (consume("while")) {
+    node = new_node(ND_WHILE, NULL, NULL);
+    expect("(");
+    node->cond = expr();
+    expect(")");
+    node->then = stmt();
+    return node;
+  }
+
+  if (consume("for")) {
+    node = new_node(ND_FOR, NULL, NULL);
+    expect("(");
+    if (!consume(";")) {
+      node->init = expr();
+      expect(";");
+    }
+    if (!consume(";")) {
+      node->cond = expr();
+      expect(";");
+    }
+    if (!consume(")")) {
+      node->inc = expr();
+      expect(")");
+    }
+    node->then = stmt();
+    return node;
+  }
+
+  node = expr();
   expect(";");
   return node;
 }
@@ -446,6 +521,76 @@ void gen(Node *node) {
   printf("  push rax\n");
 }
 
+int label_count = 0; // ジャンプ先の名前（ラベル）を区別するための番号
+
+// 文のコードを出力する（スタックには何も残さない）
+void gen_stmt(Node *node) {
+  int c;
+
+  switch (node->kind) {
+  case ND_RETURN: // 値を rax に入れて、すぐに関数から戻る
+    gen(node->lhs);
+    printf("  pop rax\n");
+    printf("  mov rsp, rbp\n");
+    printf("  pop rbp\n");
+    printf("  ret\n");
+    return;
+
+  case ND_IF:
+    c = label_count++;
+    gen(node->cond);
+    printf("  pop rax\n");
+    printf("  cmp rax, 0\n");
+    printf("  je .Lelse%d\n", c);      // 条件が 0（偽）なら else へジャンプ
+    gen_stmt(node->then);
+    printf("  jmp .Lend%d\n", c);      // then が終わったら最後へジャンプ
+    printf(".Lelse%d:\n", c);
+    if (node->els)
+      gen_stmt(node->els);
+    printf(".Lend%d:\n", c);
+    return;
+
+  case ND_WHILE:
+    c = label_count++;
+    printf(".Lbegin%d:\n", c);
+    gen(node->cond);
+    printf("  pop rax\n");
+    printf("  cmp rax, 0\n");
+    printf("  je .Lend%d\n", c);       // 条件が偽ならループを抜ける
+    gen_stmt(node->then);
+    printf("  jmp .Lbegin%d\n", c);    // 先頭に戻ってもう一度
+    printf(".Lend%d:\n", c);
+    return;
+
+  case ND_FOR:
+    c = label_count++;
+    if (node->init) {
+      gen(node->init);
+      printf("  pop rax\n");
+    }
+    printf(".Lbegin%d:\n", c);
+    if (node->cond) {
+      gen(node->cond);
+      printf("  pop rax\n");
+      printf("  cmp rax, 0\n");
+      printf("  je .Lend%d\n", c);
+    }
+    gen_stmt(node->then);
+    if (node->inc) {
+      gen(node->inc);
+      printf("  pop rax\n");
+    }
+    printf("  jmp .Lbegin%d\n", c);
+    printf(".Lend%d:\n", c);
+    return;
+
+  default: // 式の文：計算して、結果を rax に取り出す
+    gen(node);
+    printf("  pop rax\n");
+    return;
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) {
     error("引数の個数が正しくありません");
@@ -465,10 +610,8 @@ int main(int argc, char **argv) {
   printf("  mov rbp, rsp\n");
   printf("  sub rsp, 208\n");
 
-  for (int i = 0; code[i]; i++) {
-    gen(code[i]);
-    printf("  pop rax\n"); // 文の結果を捨てる（最後の文の結果がraxに残る）
-  }
+  for (int i = 0; code[i]; i++)
+    gen_stmt(code[i]); // 最後の文の結果が rax に残る
 
   // 後片付けをして、最後の文の結果を返す
   printf("  mov rsp, rbp\n");
