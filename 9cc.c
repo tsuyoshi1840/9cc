@@ -23,7 +23,7 @@ struct Token {
   Token *next;    // 次のトークン
   int val;        // 数のときの値
   char *str;      // トークンの文字列
-    int len;        // トークンの長さ
+  int len;        // トークンの長さ
 };
 
 Token *token;     // 今読んでいるトークン
@@ -51,8 +51,10 @@ void error_at(char *loc, char *fmt, ...) {
   exit(1);
 }
 
-bool consume(char op) {
-  if (token->kind != TK_RESERVED || token->str[0] != op)
+// 次が記号 op なら1つ進めて true。op は "+" や "==" のような文字列
+bool consume(char *op) {
+  if (token->kind != TK_RESERVED || strlen(op) != token->len ||
+      memcmp(token->str, op, token->len))
     return false;
   token = token->next;
   return true;
@@ -67,9 +69,10 @@ Token *consume_ident() {
   return tok;
 }
 
-void expect(char op) {
-  if (token->kind != TK_RESERVED || token->str[0] != op)
-    error_at(token->str, "'%c'ではありません", op);
+void expect(char *op) {
+  if (token->kind != TK_RESERVED || strlen(op) != token->len ||
+      memcmp(token->str, op, token->len))
+    error_at(token->str, "'%s'ではありません", op);
   token = token->next;
 }
 
@@ -85,16 +88,16 @@ bool at_eof() {
   return token->kind == TK_EOF;
 }
 
-Token *new_token(TokenKind kind, Token *cur, char *str) {
+Token *new_token(TokenKind kind, Token *cur, char *str, int len) {
   Token *tok = calloc(1, sizeof(Token));
   tok->kind = kind;
   tok->str = str;
+  tok->len = len;
   cur->next = tok;
   return tok;
 }
 
-Token *tokenize(char *p) {
-  // 英字か _ なら true
+// 英字か _ なら true
 bool is_alpha(char c) {
   return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_';
 }
@@ -104,6 +107,12 @@ bool is_alnum(char c) {
   return is_alpha(c) || ('0' <= c && c <= '9');
 }
 
+// p が q で始まっていれば true
+bool startswith(char *p, char *q) {
+  return memcmp(p, q, strlen(q)) == 0;
+}
+
+Token *tokenize(char *p) {
   Token head;
   head.next = NULL;
   Token *cur = &head;
@@ -114,36 +123,41 @@ bool is_alnum(char c) {
       continue;
     }
 
-    if (strchr("+-*/()=;", *p)) {
-      cur = new_token(TK_RESERVED, cur, p++);
+    // 2文字の記号（先にチェックする）
+    if (startswith(p, "==") || startswith(p, "!=") ||
+        startswith(p, "<=") || startswith(p, ">=")) {
+      cur = new_token(TK_RESERVED, cur, p, 2);
+      p += 2;
       continue;
     }
 
-    // a〜z の1文字を変数名とする
-    // if ('a' <= *p && *p <= 'z') {
-    //   cur = new_token(TK_IDENT, cur, p++);
-    //   continue;
-    // }
-        // 英字か _ で始まり、英数字か _ が続くものを変数名とする
+    // 1文字の記号
+    if (strchr("+-*/()<>=;", *p)) {
+      cur = new_token(TK_RESERVED, cur, p++, 1);
+      continue;
+    }
+
+    // 英字か _ で始まり、英数字か _ が続くものを変数名とする
     if (is_alpha(*p)) {
       char *start = p;
       while (is_alnum(*p))
         p++;
-      cur = new_token(TK_IDENT, cur, start);
-      cur->len = p - start;
+      cur = new_token(TK_IDENT, cur, start, p - start);
       continue;
     }
 
     if (isdigit(*p)) {
-      cur = new_token(TK_NUM, cur, p);
+      char *start = p;
+      cur = new_token(TK_NUM, cur, p, 0);
       cur->val = strtol(p, &p, 10);
+      cur->len = p - start;
       continue;
     }
 
     error_at(p, "トークナイズできません");
   }
 
-  new_token(TK_EOF, cur, p);
+  new_token(TK_EOF, cur, p, 0);
   return head.next;
 }
 
@@ -156,6 +170,10 @@ typedef enum {
   ND_SUB,    // -
   ND_MUL,    // *
   ND_DIV,    // /
+  ND_EQ,     // ==
+  ND_NE,     // !=
+  ND_LT,     // <
+  ND_LE,     // <=
   ND_ASSIGN, // =（代入）
   ND_LVAR,   // 変数
   ND_NUM,    // 整数
@@ -211,6 +229,8 @@ Node *code[100]; // 文（;で区切られたもの）を入れておく場所
 Node *stmt();
 Node *expr();
 Node *assign();
+Node *equality();
+Node *relational();
 Node *add();
 Node *mul();
 Node *unary();
@@ -227,7 +247,7 @@ void program() {
 // 文 = 式 ";"
 Node *stmt() {
   Node *node = expr();
-  expect(';');
+  expect(";");
   return node;
 }
 
@@ -236,12 +256,44 @@ Node *expr() {
   return assign();
 }
 
-// 代入 = 足し算 ("=" 代入)?
+// 代入 = 等価 ("=" 代入)?
 Node *assign() {
-  Node *node = add();
-  if (consume('='))
+  Node *node = equality();
+  if (consume("="))
     node = new_node(ND_ASSIGN, node, assign());
   return node;
+}
+
+// 等価 = 比較 ("==" 比較 | "!=" 比較)*
+Node *equality() {
+  Node *node = relational();
+
+  for (;;) {
+    if (consume("=="))
+      node = new_node(ND_EQ, node, relational());
+    else if (consume("!="))
+      node = new_node(ND_NE, node, relational());
+    else
+      return node;
+  }
+}
+
+// 比較 = 足し算 ("<" 足し算 | "<=" 足し算 | ">" 足し算 | ">=" 足し算)*
+Node *relational() {
+  Node *node = add();
+
+  for (;;) {
+    if (consume("<"))
+      node = new_node(ND_LT, node, add());
+    else if (consume("<="))
+      node = new_node(ND_LE, node, add());
+    else if (consume(">"))
+      node = new_node(ND_LT, add(), node); // a > b は b < a と同じ
+    else if (consume(">="))
+      node = new_node(ND_LE, add(), node); // a >= b は b <= a と同じ
+    else
+      return node;
+  }
 }
 
 // 足し算 = 項 ("+" 項 | "-" 項)*
@@ -249,9 +301,9 @@ Node *add() {
   Node *node = mul();
 
   for (;;) {
-    if (consume('+'))
+    if (consume("+"))
       node = new_node(ND_ADD, node, mul());
-    else if (consume('-'))
+    else if (consume("-"))
       node = new_node(ND_SUB, node, mul());
     else
       return node;
@@ -263,9 +315,9 @@ Node *mul() {
   Node *node = unary();
 
   for (;;) {
-    if (consume('*'))
+    if (consume("*"))
       node = new_node(ND_MUL, node, unary());
-    else if (consume('/'))
+    else if (consume("/"))
       node = new_node(ND_DIV, node, unary());
     else
       return node;
@@ -274,18 +326,18 @@ Node *mul() {
 
 // 単項 = ("+" | "-") 単項 | 因子
 Node *unary() {
-  if (consume('+'))
+  if (consume("+"))
     return unary();
-  if (consume('-'))
+  if (consume("-"))
     return new_node(ND_SUB, new_node_num(0), unary()); // -x は 0-x
   return primary();
 }
 
 // 因子 = 数 | 変数 | "(" 式 ")"
 Node *primary() {
-  if (consume('(')) {
+  if (consume("(")) {
     Node *node = expr();
-    expect(')');
+    expect(")");
     return node;
   }
 
@@ -293,8 +345,7 @@ Node *primary() {
   if (tok) {
     Node *node = calloc(1, sizeof(Node));
     node->kind = ND_LVAR;
-    // node->offset = (tok->str[0] - 'a' + 1) * 8; // a=8, b=16, ...
-        LVar *lvar = find_lvar(tok);
+    LVar *lvar = find_lvar(tok);
     if (!lvar) {
       // 初めて見る変数なら一覧に追加する
       lvar = calloc(1, sizeof(LVar));
@@ -368,6 +419,26 @@ void gen(Node *node) {
     printf("  cqo\n");
     printf("  idiv rdi\n");
     break;
+  case ND_EQ: // 等しければ 1、違えば 0
+    printf("  cmp rax, rdi\n");
+    printf("  sete al\n");
+    printf("  movzb rax, al\n");
+    break;
+  case ND_NE:
+    printf("  cmp rax, rdi\n");
+    printf("  setne al\n");
+    printf("  movzb rax, al\n");
+    break;
+  case ND_LT:
+    printf("  cmp rax, rdi\n");
+    printf("  setl al\n");
+    printf("  movzb rax, al\n");
+    break;
+  case ND_LE:
+    printf("  cmp rax, rdi\n");
+    printf("  setle al\n");
+    printf("  movzb rax, al\n");
+    break;
   default:
     break;
   }
@@ -389,7 +460,7 @@ int main(int argc, char **argv) {
   printf(".globl main\n");
   printf("main:\n");
 
-  // 変数26個分（a〜z）の場所をスタックに確保する
+  // 変数26個分（8バイト×26＝208）の場所をスタックに確保する
   printf("  push rbp\n");
   printf("  mov rbp, rsp\n");
   printf("  sub rsp, 208\n");
