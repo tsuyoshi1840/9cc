@@ -30,4 +30,7 @@ assert 8 "a=3; b=5; a+b;"
 assert 14 "a=3; b=5*6-8; a+b/2;"
 assert 6 "a=b=3; a+b;"
 
+assert 6 "foo=1; bar=2+3; foo+bar;"
+assert 30 "count=10; count=count*3; count;"
+assert 7 "x1=3; _y=4; x1+_y;"
 echo OK
