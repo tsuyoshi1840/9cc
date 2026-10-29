@@ -23,6 +23,7 @@ struct Token {
   Token *next;    // 次のトークン
   int val;        // 数のときの値
   char *str;      // トークンの文字列
+    int len;        // トークンの長さ
 };
 
 Token *token;     // 今読んでいるトークン
@@ -93,6 +94,16 @@ Token *new_token(TokenKind kind, Token *cur, char *str) {
 }
 
 Token *tokenize(char *p) {
+  // 英字か _ なら true
+bool is_alpha(char c) {
+  return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_';
+}
+
+// 英字か _ か数字なら true
+bool is_alnum(char c) {
+  return is_alpha(c) || ('0' <= c && c <= '9');
+}
+
   Token head;
   head.next = NULL;
   Token *cur = &head;
@@ -109,8 +120,17 @@ Token *tokenize(char *p) {
     }
 
     // a〜z の1文字を変数名とする
-    if ('a' <= *p && *p <= 'z') {
-      cur = new_token(TK_IDENT, cur, p++);
+    // if ('a' <= *p && *p <= 'z') {
+    //   cur = new_token(TK_IDENT, cur, p++);
+    //   continue;
+    // }
+        // 英字か _ で始まり、英数字か _ が続くものを変数名とする
+    if (is_alpha(*p)) {
+      char *start = p;
+      while (is_alnum(*p))
+        p++;
+      cur = new_token(TK_IDENT, cur, start);
+      cur->len = p - start;
       continue;
     }
 
@@ -164,6 +184,26 @@ Node *new_node_num(int val) {
   node->kind = ND_NUM;
   node->val = val;
   return node;
+}
+
+// ローカル変数の一覧（連結リスト）
+typedef struct LVar LVar;
+
+struct LVar {
+  LVar *next; // 次の変数
+  char *name; // 変数名
+  int len;    // 名前の長さ
+  int offset; // rbpからの距離
+};
+
+LVar *locals; // 変数一覧の先頭
+
+// 名前で変数を探す。見つからなければ NULL
+LVar *find_lvar(Token *tok) {
+  for (LVar *var = locals; var; var = var->next)
+    if (var->len == tok->len && !memcmp(tok->str, var->name, var->len))
+      return var;
+  return NULL;
 }
 
 Node *code[100]; // 文（;で区切られたもの）を入れておく場所
@@ -253,7 +293,18 @@ Node *primary() {
   if (tok) {
     Node *node = calloc(1, sizeof(Node));
     node->kind = ND_LVAR;
-    node->offset = (tok->str[0] - 'a' + 1) * 8; // a=8, b=16, ...
+    // node->offset = (tok->str[0] - 'a' + 1) * 8; // a=8, b=16, ...
+        LVar *lvar = find_lvar(tok);
+    if (!lvar) {
+      // 初めて見る変数なら一覧に追加する
+      lvar = calloc(1, sizeof(LVar));
+      lvar->next = locals;
+      lvar->name = tok->str;
+      lvar->len = tok->len;
+      lvar->offset = (locals ? locals->offset : 0) + 8;
+      locals = lvar;
+    }
+    node->offset = lvar->offset;
     return node;
   }
 
