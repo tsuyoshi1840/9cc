@@ -255,7 +255,7 @@ LVar *find_lvar(Token *tok) {
   return NULL;
 }
 
-Node *code[100]; // 文（;で区切られたもの）を入れておく場所
+// Node *code[100]; 
 
 Node *stmt();
 Node *expr();
@@ -267,11 +267,47 @@ Node *mul();
 Node *unary();
 Node *primary();
 
-// プログラム = 文*
+// 関数1つ分の情報
+typedef struct Function Function;
+
+struct Function {
+  char *name;      // 関数名
+  int len;         // 関数名の長さ
+  Node *params[6]; // 引数（変数として扱う）
+  int nparams;     // 引数の個数
+  Node *body;      // 中身（{ } のブロック）
+  int stack_size;  // 変数のために確保するスタックの大きさ
+};
+
+Function *code[100]; // 関数を入れておく場所
+
+// 関数 = 名前 "(" (名前 ("," 名前)*)? ")" "{" 文* "}"
+Function *function() {
+  Token *tok = consume_ident();
+  if (!tok)
+    error_at(token->str, "関数名ではありません");
+
+  Function *fn = calloc(1, sizeof(Function));
+  fn->name = tok->str;
+  fn->len = tok->len;
+
+  locals = NULL; // 変数一覧は関数ごとにリセット
+  expect("(");
+  while (!consume(")")) {
+    if (fn->nparams > 0)
+      expect(",");
+    fn->params[fn->nparams++] = primary(); // 引数を変数として登録
+  }
+  fn->body = stmt();
+  fn->stack_size = locals ? locals->offset : 0;
+  return fn;
+}
+
+// プログラム = 関数*
 void program() {
   int i = 0;
   while (!at_eof())
-    code[i++] = stmt();
+    code[i++] = function();
   code[i] = NULL;
 }
 
@@ -477,7 +513,7 @@ Node *primary() {
 // 変数の「住所」をスタックに積む
 void gen_lval(Node *node) {
   if (node->kind != ND_LVAR)
-    error("代入の左辺が変数ではありません");
+  error("代入の左辺が変数ではありません");
 
   printf("  mov rax, rbp\n");
   printf("  sub rax, %d\n", node->offset);
@@ -668,20 +704,26 @@ int main(int argc, char **argv) {
   program();
 
   printf(".intel_syntax noprefix\n");
-  printf(".globl main\n");
-  printf("main:\n");
 
-  // 変数26個分（8バイト×26＝208）の場所をスタックに確保する
-  printf("  push rbp\n");
-  printf("  mov rbp, rsp\n");
-  printf("  sub rsp, 208\n");
+  for (int i = 0; code[i]; i++) {
+    Function *fn = code[i];
+    printf(".globl %.*s\n", fn->len, fn->name);
+    printf("%.*s:\n", fn->len, fn->name);
 
-  for (int i = 0; code[i]; i++)
-    gen_stmt(code[i]); // 最後の文の結果が rax に残る
+    // 変数の場所を確保する（16の倍数に切り上げ）
+    printf("  push rbp\n");
+    printf("  mov rbp, rsp\n");
+    printf("  sub rsp, %d\n", (fn->stack_size + 15) / 16 * 16);
 
-  // 後片付けをして、最後の文の結果を返す
-  printf("  mov rsp, rbp\n");
-  printf("  pop rbp\n");
-  printf("  ret\n");
+    // レジスタで渡された引数を、変数の場所にしまう
+    for (int j = 0; j < fn->nparams; j++)
+      printf("  mov [rbp-%d], %s\n", fn->params[j]->offset, argreg[j]);
+
+    gen_stmt(fn->body);
+
+    printf("  mov rsp, rbp\n");
+    printf("  pop rbp\n");
+    printf("  ret\n");
+  }
   return 0;
 }
