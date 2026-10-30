@@ -109,7 +109,7 @@ bool is_alnum(char c) {
 
 // キーワード（変数名に使えない予約語）なら true
 bool is_keyword(char *p, int len) {
-  char *kw[] = {"return", "if", "else", "while", "for"};
+  char *kw[] = {"return", "if", "else", "while", "for", "int"};
   for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
     if (strlen(kw[i]) == len && !memcmp(p, kw[i], len))
       return true;
@@ -215,8 +215,12 @@ struct Node {
   Node *els;  // else のときに実行する文
   Node *init; // for の初期化
   Node *inc;  // for の更新
+
+  // { } で使う
   Node *body; // ブロックの中の最初の文
   Node *next; // 次の文
+
+  // 関数呼び出しで使う
   char *funcname; // 関数名
   int funclen;    // 関数名の長さ
   Node *args;     // 引数（next でつながる）
@@ -257,7 +261,6 @@ LVar *find_lvar(Token *tok) {
   return NULL;
 }
 
-// Node *code[100]; 
 
 Node *stmt();
 Node *expr();
@@ -268,6 +271,27 @@ Node *add();
 Node *mul();
 Node *unary();
 Node *primary();
+
+// 変数を宣言して一覧に追加する（int x; の x の部分）
+Node *declare_lvar() {
+  Token *tok = consume_ident();
+  if (!tok)
+    error_at(token->str, "変数名ではありません");
+  if (find_lvar(tok))
+    error_at(tok->str, "同じ名前の変数がすでにあります");
+
+  LVar *lvar = calloc(1, sizeof(LVar));
+  lvar->next = locals;
+  lvar->name = tok->str;
+  lvar->len = tok->len;
+  lvar->offset = (locals ? locals->offset : 0) + 8;
+  locals = lvar;
+
+  Node *node = calloc(1, sizeof(Node));
+  node->kind = ND_LVAR;
+  node->offset = lvar->offset;
+  return node;
+}
 
 // 関数1つ分の情報
 typedef struct Function Function;
@@ -285,6 +309,7 @@ Function *code[100]; // 関数を入れておく場所
 
 // 関数 = 名前 "(" (名前 ("," 名前)*)? ")" "{" 文* "}"
 Function *function() {
+  expect("int");
   Token *tok = consume_ident();
   if (!tok)
     error_at(token->str, "関数名ではありません");
@@ -298,7 +323,8 @@ Function *function() {
   while (!consume(")")) {
     if (fn->nparams > 0)
       expect(",");
-    fn->params[fn->nparams++] = primary(); // 引数を変数として登録
+    expect("int");
+    fn->params[fn->nparams++] = declare_lvar(); // 引数を変数として登録
   }
   fn->body = stmt();
   fn->stack_size = locals ? locals->offset : 0;
@@ -320,8 +346,9 @@ void program() {
 //    | "for" "(" 式? ";" 式? ";" 式? ")" 文
 Node *stmt() {
   Node *node;
-    if (consume("{")) {
-    Node head = {0};
+
+  if (consume("{")) {
+    Node head = {};
     Node *cur = &head;
     while (!consume("}")) {
       cur->next = stmt();
@@ -330,6 +357,17 @@ Node *stmt() {
     node = new_node(ND_BLOCK, NULL, NULL);
     node->body = head.next;
     return node;
+  }
+
+  if (consume("int")) { // 変数の宣言：int x; または int x = 式;
+    Node *var = declare_lvar();
+    if (consume("=")) {
+      node = new_node(ND_ASSIGN, var, expr());
+      expect(";");
+      return node;
+    }
+    expect(";");
+    return new_node(ND_BLOCK, NULL, NULL); // 宣言だけなら何もしない
   }
 
   if (consume("return")) {
@@ -477,7 +515,7 @@ Node *primary() {
   }
 
   Token *tok = consume_ident();
-    if (tok && consume("(")) {
+  if (tok && consume("(")) {
     Node *node = new_node(ND_FUNCALL, NULL, NULL);
     node->funcname = tok->str;
     node->funclen = tok->len;
@@ -492,19 +530,13 @@ Node *primary() {
     node->args = head.next;
     return node;
   }
+
   if (tok) {
     Node *node = calloc(1, sizeof(Node));
     node->kind = ND_LVAR;
     LVar *lvar = find_lvar(tok);
-    if (!lvar) {
-      // 初めて見る変数なら一覧に追加する
-      lvar = calloc(1, sizeof(LVar));
-      lvar->next = locals;
-      lvar->name = tok->str;
-      lvar->len = tok->len;
-      lvar->offset = (locals ? locals->offset : 0) + 8;
-      locals = lvar;
-    }
+    if (!lvar)
+      error_at(tok->str, "宣言されていない変数です");
     node->offset = lvar->offset;
     return node;
   }
@@ -515,27 +547,31 @@ Node *primary() {
 //
 // コード生成（構文木 → アセンブリ）
 //
+
 void gen(Node *node); // gen は下で定義するので、先に名前だけ宣言しておく
+
 // 変数の「住所」をスタックに積む
 void gen_lval(Node *node) {
-    if (node->kind == ND_DEREF) { // *p = … のとき、p の中身が書き込み先の住所
+  if (node->kind == ND_DEREF) { // *p = … のとき、p の中身が書き込み先の住所
     gen(node->lhs);
     return;
   }
   if (node->kind != ND_LVAR)
-  error("代入の左辺が変数ではありません");
+    error("代入の左辺が変数ではありません");
 
   printf("  mov rax, rbp\n");
   printf("  sub rax, %d\n", node->offset);
   printf("  push rax\n");
 }
 
-int label_count = 0;
+int label_count = 0; // ジャンプ先の名前（ラベル）を区別するための番号
+
+// 引数を入れるレジスタ（1番目〜6番目）
 char *argreg[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
 
 void gen(Node *node) {
   switch (node->kind) {
-      case ND_FUNCALL: {
+  case ND_FUNCALL: {
     int nargs = 0;
     for (Node *arg = node->args; arg; arg = arg->next) {
       gen(arg);
@@ -544,6 +580,7 @@ void gen(Node *node) {
     for (int i = nargs - 1; i >= 0; i--)
       printf("  pop %s\n", argreg[i]);
 
+    // call の前に rsp を16の倍数にそろえる決まりがある
     int c = label_count++;
     printf("  mov rax, rsp\n");
     printf("  and rax, 15\n");
@@ -563,7 +600,7 @@ void gen(Node *node) {
   case ND_NUM:
     printf("  push %d\n", node->val);
     return;
-      case ND_ADDR: // 変数の住所そのものを積む
+  case ND_ADDR: // 変数の住所そのものを積む
     gen_lval(node->lhs);
     return;
   case ND_DEREF: // 住所を計算して、その中身を読む
@@ -638,7 +675,6 @@ void gen(Node *node) {
 }
 
 
-
 // 文のコードを出力する（スタックには何も残さない）
 void gen_stmt(Node *node) {
   int c;
@@ -700,7 +736,7 @@ void gen_stmt(Node *node) {
     printf(".Lend%d:\n", c);
     return;
 
-    case ND_BLOCK:
+  case ND_BLOCK:
     for (Node *n = node->body; n; n = n->next)
       gen_stmt(n);
     return;
