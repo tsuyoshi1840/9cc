@@ -42,4 +42,8 @@ assert 2 "a=1; if (a==2) return 1; else return 2;"
 assert 10 "i=0; while (i<10) i=i+1; return i;"
 assert 55 "s=0; for (i=1; i<=10; i=i+1) s=s+i; return s;"
 assert 3 "for (;;) return 3; return 5;"
+assert 3 "{1; {2;} return 3;}"
+assert 55 "i=0; j=0; while (i<=10) {j=j+i; i=i+1;} return j;"
+assert 10 "a=0; if (1) {a=5; a=a*2;} return a;"
+assert 5 "{} return 5;"
 echo OK

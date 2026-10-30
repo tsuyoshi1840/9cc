@@ -141,7 +141,7 @@ Token *tokenize(char *p) {
     }
 
     // 1文字の記号
-    if (strchr("+-*/()<>=;", *p)) {
+    if (strchr("+-*/()<>=;{}", *p)) {
       cur = new_token(TK_RESERVED, cur, p++, 1);
       continue;
     }
@@ -194,6 +194,7 @@ typedef enum {
   ND_IF,     // if
   ND_WHILE,  // while
   ND_FOR,    // for
+  ND_BLOCK,  // { ... }
 } NodeKind;
 
 typedef struct Node Node;
@@ -211,6 +212,8 @@ struct Node {
   Node *els;  // else のときに実行する文
   Node *init; // for の初期化
   Node *inc;  // for の更新
+  Node *body; // ブロックの中の最初の文
+  Node *next; // 次の文
 };
 
 Node *new_node(NodeKind kind, Node *lhs, Node *rhs) {
@@ -275,6 +278,17 @@ void program() {
 //    | "for" "(" 式? ";" 式? ";" 式? ")" 文
 Node *stmt() {
   Node *node;
+    if (consume("{")) {
+    Node head = {0};
+    Node *cur = &head;
+    while (!consume("}")) {
+      cur->next = stmt();
+      cur = cur->next;
+    }
+    node = new_node(ND_BLOCK, NULL, NULL);
+    node->body = head.next;
+    return node;
+  }
 
   if (consume("return")) {
     node = new_node(ND_RETURN, expr(), NULL);
@@ -582,6 +596,11 @@ void gen_stmt(Node *node) {
     }
     printf("  jmp .Lbegin%d\n", c);
     printf(".Lend%d:\n", c);
+    return;
+
+    case ND_BLOCK:
+    for (Node *n = node->body; n; n = n->next)
+      gen_stmt(n);
     return;
 
   default: // 式の文：計算して、結果を rax に取り出す
