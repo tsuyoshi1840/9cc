@@ -141,7 +141,7 @@ Token *tokenize(char *p) {
     }
 
     // 1文字の記号
-    if (strchr("+-*/()<>=;{}", *p)) {
+    if (strchr("+-*/()<>=;{},", *p)) {
       cur = new_token(TK_RESERVED, cur, p++, 1);
       continue;
     }
@@ -195,6 +195,7 @@ typedef enum {
   ND_WHILE,  // while
   ND_FOR,    // for
   ND_BLOCK,  // { ... }
+  ND_FUNCALL, // 関数呼び出し
 } NodeKind;
 
 typedef struct Node Node;
@@ -214,6 +215,9 @@ struct Node {
   Node *inc;  // for の更新
   Node *body; // ブロックの中の最初の文
   Node *next; // 次の文
+  char *funcname; // 関数名
+  int funclen;    // 関数名の長さ
+  Node *args;     // 引数（next でつながる）
 };
 
 Node *new_node(NodeKind kind, Node *lhs, Node *rhs) {
@@ -431,6 +435,21 @@ Node *primary() {
   }
 
   Token *tok = consume_ident();
+    if (tok && consume("(")) {
+    Node *node = new_node(ND_FUNCALL, NULL, NULL);
+    node->funcname = tok->str;
+    node->funclen = tok->len;
+    Node head = {0};
+    Node *cur = &head;
+    while (!consume(")")) {
+      if (cur != &head)
+        expect(",");
+      cur->next = expr();
+      cur = cur->next;
+    }
+    node->args = head.next;
+    return node;
+  }
   if (tok) {
     Node *node = calloc(1, sizeof(Node));
     node->kind = ND_LVAR;
@@ -465,8 +484,36 @@ void gen_lval(Node *node) {
   printf("  push rax\n");
 }
 
+int label_count = 0;
+char *argreg[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+
 void gen(Node *node) {
   switch (node->kind) {
+      case ND_FUNCALL: {
+    int nargs = 0;
+    for (Node *arg = node->args; arg; arg = arg->next) {
+      gen(arg);
+      nargs++;
+    }
+    for (int i = nargs - 1; i >= 0; i--)
+      printf("  pop %s\n", argreg[i]);
+
+    int c = label_count++;
+    printf("  mov rax, rsp\n");
+    printf("  and rax, 15\n");
+    printf("  jnz .Lcall%d\n", c);
+    printf("  mov rax, 0\n");
+    printf("  call %.*s\n", node->funclen, node->funcname);
+    printf("  jmp .Lend%d\n", c);
+    printf(".Lcall%d:\n", c);
+    printf("  sub rsp, 8\n");
+    printf("  mov rax, 0\n");
+    printf("  call %.*s\n", node->funclen, node->funcname);
+    printf("  add rsp, 8\n");
+    printf(".Lend%d:\n", c);
+    printf("  push rax\n");
+    return;
+  }
   case ND_NUM:
     printf("  push %d\n", node->val);
     return;
@@ -535,7 +582,7 @@ void gen(Node *node) {
   printf("  push rax\n");
 }
 
-int label_count = 0; // ジャンプ先の名前（ラベル）を区別するための番号
+
 
 // 文のコードを出力する（スタックには何も残さない）
 void gen_stmt(Node *node) {
