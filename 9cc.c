@@ -141,7 +141,7 @@ Token *tokenize(char *p) {
     }
 
     // 1文字の記号
-    if (strchr("+-*/()<>=;{},", *p)) {
+    if (strchr("+-*/()<>=;{},&", *p)) {
       cur = new_token(TK_RESERVED, cur, p++, 1);
       continue;
     }
@@ -196,6 +196,8 @@ typedef enum {
   ND_FOR,    // for
   ND_BLOCK,  // { ... }
   ND_FUNCALL, // 関数呼び出し
+  ND_ADDR,    // &（住所を取り出す）
+  ND_DEREF,   // *（住所の中身を読む）
 } NodeKind;
 
 typedef struct Node Node;
@@ -459,6 +461,10 @@ Node *unary() {
     return unary();
   if (consume("-"))
     return new_node(ND_SUB, new_node_num(0), unary()); // -x は 0-x
+  if (consume("&"))
+    return new_node(ND_ADDR, unary(), NULL);
+  if (consume("*"))
+    return new_node(ND_DEREF, unary(), NULL);
   return primary();
 }
 
@@ -509,9 +515,13 @@ Node *primary() {
 //
 // コード生成（構文木 → アセンブリ）
 //
-
+void gen(Node *node); // gen は下で定義するので、先に名前だけ宣言しておく
 // 変数の「住所」をスタックに積む
 void gen_lval(Node *node) {
+    if (node->kind == ND_DEREF) { // *p = … のとき、p の中身が書き込み先の住所
+    gen(node->lhs);
+    return;
+  }
   if (node->kind != ND_LVAR)
   error("代入の左辺が変数ではありません");
 
@@ -552,6 +562,15 @@ void gen(Node *node) {
   }
   case ND_NUM:
     printf("  push %d\n", node->val);
+    return;
+      case ND_ADDR: // 変数の住所そのものを積む
+    gen_lval(node->lhs);
+    return;
+  case ND_DEREF: // 住所を計算して、その中身を読む
+    gen(node->lhs);
+    printf("  pop rax\n");
+    printf("  mov rax, [rax]\n");
+    printf("  push rax\n");
     return;
   case ND_LVAR: // 変数の値を読む
     gen_lval(node);

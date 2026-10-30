@@ -65,4 +65,8 @@ assert 7 "main() { return add2(3, 4); } add2(x, y) { return x+y; }"
 assert 1 "main() { return sub2(4, 3); } sub2(x, y) { return x-y; }"
 assert 55 "main() { return fib(10); } fib(x) { if (x<=1) return x; return fib(x-1)+fib(x-2); }"
 assert 21 "main() { return sum6(1,2,3,4,5,6); } sum6(a,b,c,d,e,f) { return a+b+c+d+e+f; }"
+assert 3 "main() { x=3; y=&x; return *y; }"
+assert 3 "main() { x=3; y=5; z=&y+8; return *z; }"
+assert 5 "main() { x=3; y=&x; *y=5; return x; }"
+assert 7 "main() { x=3; y=&x; z=&y; **z=7; return x; }"
 echo OK
