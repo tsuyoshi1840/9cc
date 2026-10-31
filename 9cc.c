@@ -60,6 +60,12 @@ bool consume(char *op) {
   return true;
 }
 
+// 次が記号 op なら true（consume と違って、進めずに見るだけ）
+bool peek(char *op) {
+  return token->kind == TK_RESERVED && strlen(op) == token->len &&
+         !memcmp(token->str, op, token->len);
+}
+
 // 次が変数名なら、そのトークンを返して1つ進める
 Token *consume_ident() {
   if (token->kind != TK_IDENT)
@@ -200,6 +206,24 @@ typedef enum {
   ND_DEREF,   // *（住所の中身を読む）
 } NodeKind;
 
+// 型（int か、何かへのポインタか）
+typedef struct Type Type;
+
+struct Type {
+  enum { INT, PTR } kind;
+  Type *ptr_to; // PTR のとき、何へのポインタか
+};
+
+Type int_type = {INT, NULL}; // int 型は1つあれば十分なので使い回す
+
+// ty へのポインタ型を作る（int → int*、int* → int** …）
+Type *pointer_to(Type *ty) {
+  Type *t = calloc(1, sizeof(Type));
+  t->kind = PTR;
+  t->ptr_to = ty;
+  return t;
+}
+
 typedef struct Node Node;
 
 struct Node {
@@ -208,6 +232,7 @@ struct Node {
   Node *rhs;     // 右の枝
   int val;       // 数のときの値
   int offset;    // 変数のときの、rbpからの距離
+  Type *ty;      // このノードの型
 
   // if / while / for で使う
   Node *cond; // 条件
@@ -231,6 +256,7 @@ Node *new_node(NodeKind kind, Node *lhs, Node *rhs) {
   node->kind = kind;
   node->lhs = lhs;
   node->rhs = rhs;
+  node->ty = &int_type; // ひとまず int。違うときはあとで上書きする
   return node;
 }
 
@@ -238,6 +264,7 @@ Node *new_node_num(int val) {
   Node *node = calloc(1, sizeof(Node));
   node->kind = ND_NUM;
   node->val = val;
+  node->ty = &int_type;
   return node;
 }
 
@@ -249,6 +276,7 @@ struct LVar {
   char *name; // 変数名
   int len;    // 名前の長さ
   int offset; // rbpからの距離
+  Type *ty;   // 変数の型
 };
 
 LVar *locals; // 変数一覧の先頭
@@ -273,7 +301,7 @@ Node *unary();
 Node *primary();
 
 // 変数を宣言して一覧に追加する（int x; の x の部分）
-Node *declare_lvar() {
+Node *declare_lvar(Type *ty) {
   Token *tok = consume_ident();
   if (!tok)
     error_at(token->str, "変数名ではありません");
@@ -285,12 +313,23 @@ Node *declare_lvar() {
   lvar->name = tok->str;
   lvar->len = tok->len;
   lvar->offset = (locals ? locals->offset : 0) + 8;
+  lvar->ty = ty;
   locals = lvar;
 
   Node *node = calloc(1, sizeof(Node));
   node->kind = ND_LVAR;
   node->offset = lvar->offset;
+  node->ty = ty;
   return node;
+}
+
+// 型 = "int" "*"*
+Type *read_type() {
+  expect("int");
+  Type *ty = &int_type;
+  while (consume("*"))
+    ty = pointer_to(ty);
+  return ty;
 }
 
 // 関数1つ分の情報
@@ -309,7 +348,7 @@ Function *code[100]; // 関数を入れておく場所
 
 // 関数 = 名前 "(" (名前 ("," 名前)*)? ")" "{" 文* "}"
 Function *function() {
-  expect("int");
+  read_type();
   Token *tok = consume_ident();
   if (!tok)
     error_at(token->str, "関数名ではありません");
@@ -323,8 +362,7 @@ Function *function() {
   while (!consume(")")) {
     if (fn->nparams > 0)
       expect(",");
-    expect("int");
-    fn->params[fn->nparams++] = declare_lvar(); // 引数を変数として登録
+    fn->params[fn->nparams++] = declare_lvar(read_type()); // 引数を変数として登録
   }
   fn->body = stmt();
   fn->stack_size = locals ? locals->offset : 0;
@@ -359,8 +397,8 @@ Node *stmt() {
     return node;
   }
 
-  if (consume("int")) { // 変数の宣言：int x; または int x = 式;
-    Node *var = declare_lvar();
+  if (peek("int")) { // 変数の宣言：int x; / int *p; / int x = 式;
+    Node *var = declare_lvar(read_type());
     if (consume("=")) {
       node = new_node(ND_ASSIGN, var, expr());
       expect(";");
@@ -465,15 +503,39 @@ Node *relational() {
   }
 }
 
+// ポインタ + 整数 は、整数を「8倍」してから足す（1つ先の変数へ進むため）
+Node *new_add(Node *lhs, Node *rhs) {
+  if (lhs->ty->kind == INT && rhs->ty->kind == PTR) { // 1 + p は p + 1 と同じ
+    Node *tmp = lhs;
+    lhs = rhs;
+    rhs = tmp;
+  }
+  if (lhs->ty->kind == PTR) {
+    Node *node = new_node(ND_ADD, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
+    node->ty = lhs->ty;
+    return node;
+  }
+  return new_node(ND_ADD, lhs, rhs);
+}
+
+Node *new_sub(Node *lhs, Node *rhs) {
+  if (lhs->ty->kind == PTR) {
+    Node *node = new_node(ND_SUB, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
+    node->ty = lhs->ty;
+    return node;
+  }
+  return new_node(ND_SUB, lhs, rhs);
+}
+
 // 足し算 = 項 ("+" 項 | "-" 項)*
 Node *add() {
   Node *node = mul();
 
   for (;;) {
     if (consume("+"))
-      node = new_node(ND_ADD, node, mul());
+      node = new_add(node, mul());
     else if (consume("-"))
-      node = new_node(ND_SUB, node, mul());
+      node = new_sub(node, mul());
     else
       return node;
   }
@@ -499,10 +561,17 @@ Node *unary() {
     return unary();
   if (consume("-"))
     return new_node(ND_SUB, new_node_num(0), unary()); // -x は 0-x
-  if (consume("&"))
-    return new_node(ND_ADDR, unary(), NULL);
-  if (consume("*"))
-    return new_node(ND_DEREF, unary(), NULL);
+  if (consume("&")) {
+    Node *node = new_node(ND_ADDR, unary(), NULL);
+    node->ty = pointer_to(node->lhs->ty); // &x の型は「x の型へのポインタ」
+    return node;
+  }
+  if (consume("*")) {
+    Node *node = new_node(ND_DEREF, unary(), NULL);
+    if (node->lhs->ty->kind == PTR)
+      node->ty = node->lhs->ty->ptr_to; // *p の型は「p が指す先の型」
+    return node;
+  }
   return primary();
 }
 
@@ -538,6 +607,7 @@ Node *primary() {
     if (!lvar)
       error_at(tok->str, "宣言されていない変数です");
     node->offset = lvar->offset;
+    node->ty = lvar->ty;
     return node;
   }
 

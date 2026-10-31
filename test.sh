@@ -71,7 +71,12 @@ assert 21 "int main() { return add6(1,2,3,4,5,6); }"
 assert 7 "int main() { return add2(3, 4); } int add2(int x, int y) { return x+y; }"
 assert 55 "int main() { return fib(10); } int fib(int x) { if (x<=1) return x; return fib(x-1)+fib(x-2); }"
 
-assert 3 "int main() { int x=3; int y=&x; return *y; }"
-assert 5 "int main() { int x=3; int y=&x; *y=5; return x; }"
+assert 3 "int main() { int x=3; int *y=&x; return *y; }"
+assert 5 "int main() { int x=3; int *y=&x; *y=5; return x; }"
 
+assert 3 "int main() { int x=3; int *y=&x; int **z=&y; return **z; }"
+assert 3 "int main() { int x=3; int y=5; int *p=&y; return *(p+1); }"
+assert 5 "int main() { int x=3; int y=5; int *p=&x; return *(p-1); }"
+assert 7 "int main() { int x=3; int y=5; int *p=&y; *(p+1)=7; return x; }"
 echo OK
+
