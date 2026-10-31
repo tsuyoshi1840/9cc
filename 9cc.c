@@ -115,7 +115,7 @@ bool is_alnum(char c) {
 
 // キーワード（変数名に使えない予約語）なら true
 bool is_keyword(char *p, int len) {
-  char *kw[] = {"return", "if", "else", "while", "for", "int"};
+  char *kw[] = {"return", "if", "else", "while", "for", "int", "sizeof"};
   for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
     if (strlen(kw[i]) == len && !memcmp(p, kw[i], len))
       return true;
@@ -215,6 +215,13 @@ struct Type {
 };
 
 Type int_type = {INT, NULL}; // int 型は1つあれば十分なので使い回す
+
+// 型の大きさ（バイト数）。sizeof で使う
+int size_of(Type *ty) {
+  if (ty->kind == PTR)
+    return 8; // 住所は64ビット＝8バイト
+  return 4;   // int は4バイト（本物の C と同じ）
+}
 
 // ty へのポインタ型を作る（int → int*、int* → int** …）
 Type *pointer_to(Type *ty) {
@@ -557,6 +564,10 @@ Node *mul() {
 
 // 単項 = ("+" | "-") 単項 | 因子
 Node *unary() {
+  if (consume("sizeof")) {
+    Node *node = unary();
+    return new_node_num(size_of(node->ty)); // 計算はせず、型の大きさだけ使う
+  }
   if (consume("+"))
     return unary();
   if (consume("-"))
