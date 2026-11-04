@@ -204,6 +204,7 @@ typedef enum {
   ND_FUNCALL, // 関数呼び出し
   ND_ADDR,    // &（住所を取り出す）
   ND_DEREF,   // *（住所の中身を読む）
+  ND_GVAR,    // グローバル変数
 } NodeKind;
 
 // 型（int か、何かへのポインタか）
@@ -252,6 +253,8 @@ struct Node {
   int val;       // 数のときの値
   int offset;    // 変数のときの、rbpからの距離
   Type *ty;      // このノードの型
+  char *name;    // グローバル変数のときの名前
+  int len;       // グローバル変数の名前の長さ
 
   // if / while / for で使う
   Node *cond; // 条件
@@ -298,7 +301,16 @@ struct LVar {
   Type *ty;   // 変数の型
 };
 
-LVar *locals; // 変数一覧の先頭
+LVar *locals;  // ローカル変数一覧の先頭（関数ごとにリセット）
+LVar *globals; // グローバル変数一覧の先頭（プログラム全体で1つ）
+
+// 名前でグローバル変数を探す。見つからなければ NULL
+LVar *find_gvar(Token *tok) {
+  for (LVar *var = globals; var; var = var->next)
+    if (var->len == tok->len && !memcmp(tok->str, var->name, var->len))
+      return var;
+  return NULL;
+}
 
 // 名前で変数を探す。見つからなければ NULL
 LVar *find_lvar(Token *tok) {
@@ -398,11 +410,45 @@ Function *function() {
   return fn;
 }
 
-// プログラム = 関数*
+// グローバル変数 = 型 名前 ("[" 数 "]")? ";"
+void global_var() {
+  Type *ty = read_type();
+  Token *tok = consume_ident();
+  if (!tok)
+    error_at(token->str, "変数名ではありません");
+  if (consume("[")) {
+    ty = array_of(ty, expect_number());
+    expect("]");
+  }
+  expect(";");
+
+  LVar *var = calloc(1, sizeof(LVar));
+  var->next = globals;
+  var->name = tok->str;
+  var->len = tok->len;
+  var->ty = ty;
+  globals = var;
+}
+
+// 次に来るのが関数なら true（型と名前のあとに "(" があるか、先読みするだけ）
+bool is_function() {
+  Token *saved = token;
+  read_type();
+  consume_ident();
+  bool result = consume("(");
+  token = saved; // 読んだ位置を元に戻す
+  return result;
+}
+
+// プログラム = (関数 | グローバル変数)*
 void program() {
   int i = 0;
-  while (!at_eof())
-    code[i++] = function();
+  while (!at_eof()) {
+    if (is_function())
+      code[i++] = function();
+    else
+      global_var();
+  }
   code[i] = NULL;
 }
 
@@ -651,8 +697,17 @@ Node *primary() {
     Node *node = calloc(1, sizeof(Node));
     node->kind = ND_LVAR;
     LVar *lvar = find_lvar(tok);
-    if (!lvar)
-      error_at(tok->str, "宣言されていない変数です");
+    if (!lvar) {
+      // ローカルになければグローバルを探す
+      LVar *gvar = find_gvar(tok);
+      if (!gvar)
+        error_at(tok->str, "宣言されていない変数です");
+      node->kind = ND_GVAR;
+      node->name = gvar->name;
+      node->len = gvar->len;
+      node->ty = gvar->ty;
+      return node;
+    }
     node->offset = lvar->offset;
     node->ty = lvar->ty;
     return node;
@@ -671,6 +726,11 @@ void gen(Node *node); // gen は下で定義するので、先に名前だけ宣
 void gen_lval(Node *node) {
   if (node->kind == ND_DEREF) { // *p = … のとき、p の中身が書き込み先の住所
     gen(node->lhs);
+    return;
+  }
+  if (node->kind == ND_GVAR) { // グローバル変数の住所は「名前」で決まる
+    printf("  lea rax, [rip+%.*s]\n", node->len, node->name);
+    printf("  push rax\n");
     return;
   }
   if (node->kind != ND_LVAR)
@@ -727,6 +787,7 @@ void gen(Node *node) {
     printf("  push rax\n");
     return;
   case ND_LVAR: // 変数の値を読む
+  case ND_GVAR:
     gen_lval(node);
     if (node->ty->kind == ARRAY)
       return; // 配列は「先頭の住所」として扱う（中身は読まない）
@@ -878,6 +939,17 @@ int main(int argc, char **argv) {
   program();
 
   printf(".intel_syntax noprefix\n");
+
+  // グローバル変数の場所を確保する（.data はデータを置く場所）
+  printf(".data\n");
+  for (LVar *var = globals; var; var = var->next) {
+    int size = (var->ty->kind == ARRAY) ? var->ty->array_len * 8 : 8;
+    printf("%.*s:\n", var->len, var->name);
+    printf("  .zero %d\n", size); // size バイトを 0 で埋めておく
+  }
+
+  // ここから下はプログラム（.text は命令を置く場所）
+  printf(".text\n");
 
   for (int i = 0; code[i]; i++) {
     Function *fn = code[i];
