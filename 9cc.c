@@ -161,6 +161,23 @@ Token *tokenize(char *p) {
       continue;
     }
 
+    // 行コメント：// から行の終わりまで読み飛ばす
+    if (startswith(p, "//")) {
+      p += 2;
+      while (*p != '\n')
+        p++;
+      continue;
+    }
+
+    // ブロックコメント：/* から */ までを読み飛ばす（何行あってもOK）
+    if (startswith(p, "/*")) {
+      char *q = strstr(p + 2, "*/"); // 閉じる */ を探す
+      if (!q)
+        error_at(p, "コメントが閉じられていません");
+      p = q + 2;
+      continue;
+    }
+
     // 文字列リテラル："abc" の中身（abc の部分）をトークンにする
     if (*p == '"') {
       char *start = ++p; // 最初の " の次から

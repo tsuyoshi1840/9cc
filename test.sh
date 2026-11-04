@@ -111,4 +111,13 @@ assert 0 "int main() { return \"abc\"[3]; }"
 assert 4 "int main() { return sizeof(\"abc\"); }"
 assert 98 "int main() { char *s=\"abc\"; return s[1]; }"
 assert 0 "int main() { printf(\"Hello, 9cc!\\n\"); return 0; }"
+assert 3 "int main() { return 3; } // ここはコメント"
+assert 2 "int main() { /* return 1; */ return 2; }"
+assert 5 "int main() { return /* 途中にも書ける */ 5; }"
+assert 4 "int main() {
+  // return 1;
+  /* return 2;
+     return 3; */
+  return 4;
+}"
 echo OK
