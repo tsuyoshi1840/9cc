@@ -11,7 +11,8 @@ assert() {
   expected="$1"
   input="$2"
 
-  ./9cc "$input" > tmp.s
+  echo "$input" > tmp.c   # プログラムをファイルに書き出して
+  ./9cc tmp.c > tmp.s     # 9cc にはファイル名を渡す
   gcc -o tmp tmp.s tmp2.o
   ./tmp
   actual="$?"
@@ -97,4 +98,17 @@ assert 7 "int x; int y; int main() { x=3; y=4; return x+y; }"
 assert 5 "int x; int main() { setx(); return x; } int setx() { x=5; return 0; }"
 assert 3 "int a[3]; int main() { a[0]=1; a[2]=2; return a[0]+a[2]; }"
 assert 4 "int x; int main() { int x=4; return x; }"
+assert 3 "int main() { char x=3; return x; }"
+assert 1 "int main() { char x; return sizeof(x); }"
+assert 3 "int main() { char x[3]; x[0]=-1; x[1]=2; int y=4; return x[0]+y; }"
+assert 3 "int main() { char x[3]; return sizeof(x); }"
+assert 2 "int main() { char x[3]; x[0]=1; x[1]=2; x[2]=3; char *p=x; return *(p+1); }"
+assert 5 "int main() { return sub_char(7, 1, 1); } int sub_char(char a, char b, char c) { return a-b-c; }"
+assert 7 "char g; int main() { g=7; return g; }"
+assert 97 "int main() { return \"abc\"[0]; }"
+assert 99 "int main() { return \"abc\"[2]; }"
+assert 0 "int main() { return \"abc\"[3]; }"
+assert 4 "int main() { return sizeof(\"abc\"); }"
+assert 98 "int main() { char *s=\"abc\"; return s[1]; }"
+assert 0 "int main() { printf(\"Hello, 9cc!\\n\"); return 0; }"
 echo OK

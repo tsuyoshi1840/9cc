@@ -13,6 +13,7 @@ typedef enum {
   TK_RESERVED, // 記号
   TK_IDENT,    // 変数名
   TK_NUM,      // 整数
+  TK_STR,      // 文字列リテラル "..."
   TK_EOF,      // 入力の終わり
 } TokenKind;
 
@@ -27,7 +28,8 @@ struct Token {
 };
 
 Token *token;     // 今読んでいるトークン
-char *user_input; // 入力全体
+char *user_input; // 入力全体（ファイルの中身）
+char *filename;   // 入力ファイルの名前
 
 void error(char *fmt, ...) {
   va_list ap;
@@ -37,14 +39,35 @@ void error(char *fmt, ...) {
   exit(1);
 }
 
-// エラーの場所を ^ で示す
+// エラーの場所を「ファイル名:行番号」と ^ で示す
+//
+// 例：foo.c:10: x = y + + 5;
+//                       ^ 式ではありません
 void error_at(char *loc, char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
 
-  int pos = loc - user_input;
-  fprintf(stderr, "%s\n", user_input);
-  fprintf(stderr, "%*s", pos, " ");
+  // loc がある行の、先頭と末尾を探す
+  char *line = loc;
+  while (user_input < line && line[-1] != '\n')
+    line--;
+  char *end = loc;
+  while (*end && *end != '\n')
+    end++;
+
+  // その行が何行目かを数える
+  int line_num = 1;
+  for (char *p = user_input; p < line; p++)
+    if (*p == '\n')
+      line_num++;
+
+  // 見つけた行を、ファイル名と行番号つきで表示する
+  int indent = fprintf(stderr, "%s:%d: ", filename, line_num);
+  fprintf(stderr, "%.*s\n", (int)(end - line), line);
+
+  // エラーの場所を ^ で指す
+  int pos = loc - line + indent;
+  fprintf(stderr, "%*s", pos, ""); // pos 個の空白
   fprintf(stderr, "^ ");
   vfprintf(stderr, fmt, ap);
   fprintf(stderr, "\n");
@@ -115,7 +138,7 @@ bool is_alnum(char c) {
 
 // キーワード（変数名に使えない予約語）なら true
 bool is_keyword(char *p, int len) {
-  char *kw[] = {"return", "if", "else", "while", "for", "int", "sizeof"};
+  char *kw[] = {"return", "if", "else", "while", "for", "int", "char", "sizeof"};
   for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
     if (strlen(kw[i]) == len && !memcmp(p, kw[i], len))
       return true;
@@ -135,6 +158,21 @@ Token *tokenize(char *p) {
   while (*p) {
     if (isspace(*p)) {
       p++;
+      continue;
+    }
+
+    // 文字列リテラル："abc" の中身（abc の部分）をトークンにする
+    if (*p == '"') {
+      char *start = ++p; // 最初の " の次から
+      while (*p && *p != '"') {
+        if (*p == '\\')
+          p++; // \" や \n は2文字で1セット。次の文字は飛ばす
+        p++;
+      }
+      if (!*p)
+        error_at(start - 1, "文字列が閉じられていません");
+      cur = new_token(TK_STR, cur, start, p - start);
+      p++; // 最後の " を飛ばす
       continue;
     }
 
@@ -207,16 +245,17 @@ typedef enum {
   ND_GVAR,    // グローバル変数
 } NodeKind;
 
-// 型（int か、何かへのポインタか）
+// 型（int / char か、何かへのポインタか、配列か）
 typedef struct Type Type;
 
 struct Type {
-  enum { INT, PTR, ARRAY } kind;
+  enum { INT, CHAR, PTR, ARRAY } kind;
   Type *ptr_to;  // PTR のとき何へのポインタか / ARRAY のとき中身の型
   int array_len; // ARRAY のとき、要素の数
 };
 
 Type int_type = {INT, NULL}; // int 型は1つあれば十分なので使い回す
+Type char_type = {CHAR, NULL}; // char 型も同じく1つだけ
 
 // 型の大きさ（バイト数）。sizeof で使う
 int size_of(Type *ty) {
@@ -224,7 +263,18 @@ int size_of(Type *ty) {
     return 8; // 住所は64ビット＝8バイト
   if (ty->kind == ARRAY)
     return size_of(ty->ptr_to) * ty->array_len; // 中身の大きさ × 個数
+  if (ty->kind == CHAR)
+    return 1; // char は1バイト
   return 4;   // int は4バイト（本物の C と同じ）
+}
+
+// 実際にメモリ上で使う大きさ。char は1バイト、それ以外は今のところ8バイトの箱
+int slot_size(Type *ty) {
+  if (ty->kind == CHAR)
+    return 1;
+  if (ty->kind == ARRAY)
+    return slot_size(ty->ptr_to) * ty->array_len;
+  return 8;
 }
 
 // 「ty が len 個並んだ配列」の型を作る（int a[3] → int が3個）
@@ -299,6 +349,8 @@ struct LVar {
   int len;    // 名前の長さ
   int offset; // rbpからの距離
   Type *ty;   // 変数の型
+  char *contents; // 文字列リテラルのときの中身（ふつうの変数なら NULL）
+  int cont_len;   // 中身の長さ
 };
 
 LVar *locals;  // ローカル変数一覧の先頭（関数ごとにリセット）
@@ -346,8 +398,8 @@ Node *declare_lvar(Type *ty) {
     expect("]");
   }
 
-  // 配列なら要素の数だけ、そうでなければ1個分（8バイト）の場所を使う
-  int size = (ty->kind == ARRAY) ? ty->array_len * 8 : 8;
+  // 型に合わせた大きさの場所を使う（char は1バイト）
+  int size = slot_size(ty);
 
   LVar *lvar = calloc(1, sizeof(LVar));
   lvar->next = locals;
@@ -364,10 +416,15 @@ Node *declare_lvar(Type *ty) {
   return node;
 }
 
-// 型 = "int" "*"*
+// 型 = ("int" | "char") "*"*
 Type *read_type() {
-  expect("int");
-  Type *ty = &int_type;
+  Type *ty;
+  if (consume("char"))
+    ty = &char_type;
+  else {
+    expect("int");
+    ty = &int_type;
+  }
   while (consume("*"))
     ty = pointer_to(ty);
   return ty;
@@ -472,7 +529,7 @@ Node *stmt() {
     return node;
   }
 
-  if (peek("int")) { // 変数の宣言：int x; / int *p; / int x = 式;
+  if (peek("int") || peek("char")) { // 変数の宣言：int x; / char c; / int x = 式;
     Node *var = declare_lvar(read_type());
     if (consume("=")) {
       node = new_node(ND_ASSIGN, var, expr());
@@ -578,7 +635,7 @@ Node *relational() {
   }
 }
 
-// ポインタ + 整数 は、整数を「8倍」してから足す（1つ先の変数へ進むため）
+// ポインタ + 整数 は、整数を「中身の大きさ倍」してから足す（char なら1倍、それ以外は8倍）
 Node *new_add(Node *lhs, Node *rhs) {
   if (!lhs->ty->ptr_to && rhs->ty->ptr_to) { // 1 + p は p + 1 と同じ
     Node *tmp = lhs;
@@ -586,7 +643,7 @@ Node *new_add(Node *lhs, Node *rhs) {
     rhs = tmp;
   }
   if (lhs->ty->ptr_to) { // ポインタか配列なら
-    Node *node = new_node(ND_ADD, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
+    Node *node = new_node(ND_ADD, lhs, new_node(ND_MUL, rhs, new_node_num(slot_size(lhs->ty->ptr_to))));
     node->ty = pointer_to(lhs->ty->ptr_to); // 配列 + 1 はポインタになる
     return node;
   }
@@ -595,7 +652,7 @@ Node *new_add(Node *lhs, Node *rhs) {
 
 Node *new_sub(Node *lhs, Node *rhs) {
   if (lhs->ty->ptr_to) { // ポインタか配列なら
-    Node *node = new_node(ND_SUB, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
+    Node *node = new_node(ND_SUB, lhs, new_node(ND_MUL, rhs, new_node_num(slot_size(lhs->ty->ptr_to))));
     node->ty = pointer_to(lhs->ty->ptr_to); // 配列 + 1 はポインタになる
     return node;
   }
@@ -668,8 +725,38 @@ Node *postfix() {
   return node;
 }
 
-// 因子 = 数 | 変数 | "(" 式 ")"
+int str_count = 0; // 文字列リテラルに .LC0, .LC1 … と番号をふる
+
+// 文字列リテラルを「名前のないグローバルな char 配列」として登録する
+Node *new_string(Token *tok) {
+  char *name = calloc(20, 1);
+  sprintf(name, ".LC%d", str_count++);
+
+  LVar *var = calloc(1, sizeof(LVar));
+  var->next = globals;
+  var->name = name;
+  var->len = strlen(name);
+  var->ty = array_of(&char_type, tok->len + 1); // 最後の \0 のぶん +1
+  var->contents = tok->str;
+  var->cont_len = tok->len;
+  globals = var;
+
+  Node *node = calloc(1, sizeof(Node));
+  node->kind = ND_GVAR;
+  node->name = var->name;
+  node->len = var->len;
+  node->ty = var->ty;
+  return node;
+}
+
+// 因子 = 数 | 文字列 | 変数 | "(" 式 ")"
 Node *primary() {
+  if (token->kind == TK_STR) {
+    Token *tok = token;
+    token = token->next;
+    return new_string(tok);
+  }
+
   if (consume("(")) {
     Node *node = expr();
     expect(")");
@@ -720,7 +807,17 @@ Node *primary() {
 // コード生成（構文木 → アセンブリ）
 //
 
-void gen(Node *node); // gen は下で定義するので、先に名前だけ宣言しておく
+void gen(Node *node);
+
+// スタックの上の住所から、型に合わせた大きさで値を読む
+void load(Type *ty) {
+  printf("  pop rax\n");
+  if (ty->kind == CHAR)
+    printf("  movsx rax, byte ptr [rax]\n"); // 1バイト読んで8バイトに広げる
+  else
+    printf("  mov rax, [rax]\n");
+  printf("  push rax\n");
+} // gen は下で定義するので、先に名前だけ宣言しておく
 
 // 変数の「住所」をスタックに積む
 void gen_lval(Node *node) {
@@ -745,6 +842,7 @@ int label_count = 0; // ジャンプ先の名前（ラベル）を区別する�
 
 // 引数を入れるレジスタ（1番目〜6番目）
 char *argreg[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+char *argreg8[] = {"dil", "sil", "dl", "cl", "r8b", "r9b"}; // 1バイト版（char 用）
 
 void gen(Node *node) {
   switch (node->kind) {
@@ -782,25 +880,24 @@ void gen(Node *node) {
     return;
   case ND_DEREF: // 住所を計算して、その中身を読む
     gen(node->lhs);
-    printf("  pop rax\n");
-    printf("  mov rax, [rax]\n");
-    printf("  push rax\n");
+    load(node->ty);
     return;
   case ND_LVAR: // 変数の値を読む
   case ND_GVAR:
     gen_lval(node);
     if (node->ty->kind == ARRAY)
       return; // 配列は「先頭の住所」として扱う（中身は読まない）
-    printf("  pop rax\n");
-    printf("  mov rax, [rax]\n");
-    printf("  push rax\n");
+    load(node->ty);
     return;
   case ND_ASSIGN: // 変数に値を書き込む
     gen_lval(node->lhs);
     gen(node->rhs);
     printf("  pop rdi\n");
     printf("  pop rax\n");
-    printf("  mov [rax], rdi\n");
+    if (node->lhs->ty->kind == CHAR)
+      printf("  mov [rax], dil\n"); // char は1バイトだけ書く
+    else
+      printf("  mov [rax], rdi\n");
     printf("  push rdi\n");
     return;
   default:
@@ -928,13 +1025,39 @@ void gen_stmt(Node *node) {
   }
 }
 
+// ファイルの中身を全部読んで、1つの文字列として返す
+char *read_file(char *path) {
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    error("ファイルを開けません: %s", path);
+
+  // ファイルの大きさを調べる（最後まで移動して位置を見る → 先頭に戻る）
+  if (fseek(fp, 0, SEEK_END) == -1)
+    error("%s: fseek に失敗しました", path);
+  size_t size = ftell(fp);
+  if (fseek(fp, 0, SEEK_SET) == -1)
+    error("%s: fseek に失敗しました", path);
+
+  // 中身を読み込む（あとで \n と \0 を足すので +2）
+  char *buf = calloc(1, size + 2);
+  fread(buf, size, 1, fp);
+
+  // ファイルが改行で終わっていなければ \n を足す。最後は必ず \0
+  if (size == 0 || buf[size - 1] != '\n')
+    buf[size++] = '\n';
+  buf[size] = '\0';
+  fclose(fp);
+  return buf;
+}
+
 int main(int argc, char **argv) {
   if (argc != 2) {
-    error("引数の個数が正しくありません");
+    error("使い方: ./9cc ファイル名");
     return 1;
   }
 
-  user_input = argv[1];
+  filename = argv[1];
+  user_input = read_file(filename); // 引数はファイル名。中身を読み込む
   token = tokenize(user_input);
   program();
 
@@ -943,9 +1066,12 @@ int main(int argc, char **argv) {
   // グローバル変数の場所を確保する（.data はデータを置く場所）
   printf(".data\n");
   for (LVar *var = globals; var; var = var->next) {
-    int size = (var->ty->kind == ARRAY) ? var->ty->array_len * 8 : 8;
+    int size = slot_size(var->ty);
     printf("%.*s:\n", var->len, var->name);
-    printf("  .zero %d\n", size); // size バイトを 0 で埋めておく
+    if (var->contents)
+      printf("  .string \"%.*s\"\n", var->cont_len, var->contents); // 文字列の中身（最後に \0 が付く）
+    else
+      printf("  .zero %d\n", size); // size バイトを 0 で埋めておく
   }
 
   // ここから下はプログラム（.text は命令を置く場所）
@@ -962,8 +1088,13 @@ int main(int argc, char **argv) {
     printf("  sub rsp, %d\n", (fn->stack_size + 15) / 16 * 16);
 
     // レジスタで渡された引数を、変数の場所にしまう
-    for (int j = 0; j < fn->nparams; j++)
-      printf("  mov [rbp-%d], %s\n", fn->params[j]->offset, argreg[j]);
+    for (int j = 0; j < fn->nparams; j++) {
+      Node *param = fn->params[j];
+      if (param->ty->kind == CHAR)
+        printf("  mov [rbp-%d], %s\n", param->offset, argreg8[j]); // char は1バイトだけしまう
+      else
+        printf("  mov [rbp-%d], %s\n", param->offset, argreg[j]);
+    }
 
     gen_stmt(fn->body);
 
