@@ -147,7 +147,7 @@ Token *tokenize(char *p) {
     }
 
     // 1文字の記号
-    if (strchr("+-*/()<>=;{},&", *p)) {
+    if (strchr("+-*/()<>=;{},&[]", *p)) {
       cur = new_token(TK_RESERVED, cur, p++, 1);
       continue;
     }
@@ -210,8 +210,9 @@ typedef enum {
 typedef struct Type Type;
 
 struct Type {
-  enum { INT, PTR } kind;
-  Type *ptr_to; // PTR のとき、何へのポインタか
+  enum { INT, PTR, ARRAY } kind;
+  Type *ptr_to;  // PTR のとき何へのポインタか / ARRAY のとき中身の型
+  int array_len; // ARRAY のとき、要素の数
 };
 
 Type int_type = {INT, NULL}; // int 型は1つあれば十分なので使い回す
@@ -220,7 +221,18 @@ Type int_type = {INT, NULL}; // int 型は1つあれば十分なので使い回�
 int size_of(Type *ty) {
   if (ty->kind == PTR)
     return 8; // 住所は64ビット＝8バイト
+  if (ty->kind == ARRAY)
+    return size_of(ty->ptr_to) * ty->array_len; // 中身の大きさ × 個数
   return 4;   // int は4バイト（本物の C と同じ）
+}
+
+// 「ty が len 個並んだ配列」の型を作る（int a[3] → int が3個）
+Type *array_of(Type *ty, int len) {
+  Type *t = calloc(1, sizeof(Type));
+  t->kind = ARRAY;
+  t->ptr_to = ty;
+  t->array_len = len;
+  return t;
 }
 
 // ty へのポインタ型を作る（int → int*、int* → int** …）
@@ -305,6 +317,7 @@ Node *relational();
 Node *add();
 Node *mul();
 Node *unary();
+Node *postfix();
 Node *primary();
 
 // 変数を宣言して一覧に追加する（int x; の x の部分）
@@ -315,11 +328,20 @@ Node *declare_lvar(Type *ty) {
   if (find_lvar(tok))
     error_at(tok->str, "同じ名前の変数がすでにあります");
 
+  // 名前のあとに [数] があれば配列
+  if (consume("[")) {
+    ty = array_of(ty, expect_number());
+    expect("]");
+  }
+
+  // 配列なら要素の数だけ、そうでなければ1個分（8バイト）の場所を使う
+  int size = (ty->kind == ARRAY) ? ty->array_len * 8 : 8;
+
   LVar *lvar = calloc(1, sizeof(LVar));
   lvar->next = locals;
   lvar->name = tok->str;
   lvar->len = tok->len;
-  lvar->offset = (locals ? locals->offset : 0) + 8;
+  lvar->offset = (locals ? locals->offset : 0) + size;
   lvar->ty = ty;
   locals = lvar;
 
@@ -512,23 +534,23 @@ Node *relational() {
 
 // ポインタ + 整数 は、整数を「8倍」してから足す（1つ先の変数へ進むため）
 Node *new_add(Node *lhs, Node *rhs) {
-  if (lhs->ty->kind == INT && rhs->ty->kind == PTR) { // 1 + p は p + 1 と同じ
+  if (!lhs->ty->ptr_to && rhs->ty->ptr_to) { // 1 + p は p + 1 と同じ
     Node *tmp = lhs;
     lhs = rhs;
     rhs = tmp;
   }
-  if (lhs->ty->kind == PTR) {
+  if (lhs->ty->ptr_to) { // ポインタか配列なら
     Node *node = new_node(ND_ADD, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
-    node->ty = lhs->ty;
+    node->ty = pointer_to(lhs->ty->ptr_to); // 配列 + 1 はポインタになる
     return node;
   }
   return new_node(ND_ADD, lhs, rhs);
 }
 
 Node *new_sub(Node *lhs, Node *rhs) {
-  if (lhs->ty->kind == PTR) {
+  if (lhs->ty->ptr_to) { // ポインタか配列なら
     Node *node = new_node(ND_SUB, lhs, new_node(ND_MUL, rhs, new_node_num(8)));
-    node->ty = lhs->ty;
+    node->ty = pointer_to(lhs->ty->ptr_to); // 配列 + 1 はポインタになる
     return node;
   }
   return new_node(ND_SUB, lhs, rhs);
@@ -579,11 +601,25 @@ Node *unary() {
   }
   if (consume("*")) {
     Node *node = new_node(ND_DEREF, unary(), NULL);
-    if (node->lhs->ty->kind == PTR)
+    if (node->lhs->ty->ptr_to)
       node->ty = node->lhs->ty->ptr_to; // *p の型は「p が指す先の型」
     return node;
   }
-  return primary();
+  return postfix();
+}
+
+// 後置 = 因子 ("[" 式 "]")*
+// a[i] は *(a+i) と同じ意味にする
+Node *postfix() {
+  Node *node = primary();
+  while (consume("[")) {
+    Node *idx = expr();
+    expect("]");
+    Node *add = new_add(node, idx);
+    node = new_node(ND_DEREF, add, NULL);
+    node->ty = add->ty->ptr_to;
+  }
+  return node;
 }
 
 // 因子 = 数 | 変数 | "(" 式 ")"
@@ -692,6 +728,8 @@ void gen(Node *node) {
     return;
   case ND_LVAR: // 変数の値を読む
     gen_lval(node);
+    if (node->ty->kind == ARRAY)
+      return; // 配列は「先頭の住所」として扱う（中身は読まない）
     printf("  pop rax\n");
     printf("  mov rax, [rax]\n");
     printf("  push rax\n");
